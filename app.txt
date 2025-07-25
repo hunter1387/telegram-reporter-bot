@@ -1,44 +1,95 @@
-from flask import Flask, request
-import requests
+import asyncio
+import os
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, ConversationHandler, filters
+from telethon.sync import TelegramClient
+from telethon.tl.types import (
+    InputReportReasonSpam,
+    InputReportReasonFake,
+    InputReportReasonViolence,
+    InputReportReasonPornography,
+    InputReportReasonOther,
+)
 
-app = Flask(__name__)
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+PHONE = os.environ.get("PHONE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# توکن رباتتو اینجا بذار
-TOKEN = 'BCHJI0MEPIEOGKSGXIAMYMCQLKXJNFPWGIEHZUQFLDFYUQQJTPZASYJAZUSWDLLP'
+reason_map = {
+    "spam": InputReportReasonSpam(),
+    "fake": InputReportReasonFake(),
+    "violence": InputReportReasonViolence(),
+    "porn": InputReportReasonPornography(),
+    "other": InputReportReasonOther()
+}
 
-# لینک پایه روبیکا بات
-API_URL = f'https://botapi.rubika.ir/v3/{TOKEN}'
+# مراحل مکالمه
+USERNAME, REASON, COUNT = range(3)
 
-# زمانی که پیام جدیدی به ربات فرستاده میشه، روبیکا این endpoint رو صدا میزنه
-@app.route('/rubika-bot', methods=['POST'])
-def webhook():
-    data = request.json
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("آیدی هدف (بدون @) را بفرست:")
+    return USERNAME
+
+async def username_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['username'] = update.message.text.strip().replace("@", "")
+    await update.message.reply_text("دلیل ریپورت (spam, fake, violence, porn, other):")
+    return REASON
+
+async def reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reason = update.message.text.strip().lower()
+    if reason not in reason_map:
+        await update.message.reply_text("❌ دلیل معتبر نیست.")
+        return REASON
+    context.user_data['reason'] = reason
+    await update.message.reply_text("چند پست آخر را ریپورت کنیم؟ (مثلاً 50):")
+    return COUNT
+
+async def count_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = int(update.message.text.strip())
+    username = context.user_data['username']
+    reason = context.user_data['reason']
+
+    await update.message.reply_text("⏳ شروع ریپورت...")
+
+    client = TelegramClient("session", API_ID, API_HASH)
+    await client.start(phone=PHONE)
 
     try:
-        # چک می‌کنیم پیام جدید از کاربر اومده
-        update = data.get('update')
-        if update and update['type'] == 'NewMessage':
-            chat_id = update['chat_id']
-            text = update['new_message']['text']
+        entity = await client.get_entity(username)
+        messages = await client.get_messages(entity, limit=count)
+        success = 0
+        for i, msg in enumerate(messages, 1):
+            try:
+                await client.report_messages(entity, [msg.id], reason_map[reason], f"Reported via bot")
+                success += 1
+            except Exception as e:
+                await update.message.reply_text(f"خطا در پست {i}: {e}")
+        await update.message.reply_text(f"😽 تمام شد. تعداد موفق: {success}/{count}")
+    finally:
+        await client.disconnect()
+    return ConversationHandler.END
 
-            # ارسال پاسخ
-            send_message(chat_id, f"پیامتو گرفتم: {text}")
-        
-        return 'ok'
-    except Exception as e:
-        print("Error:", e)
-        return 'error'
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ لغو شد.")
+    return ConversationHandler.END
 
-# تابع ارسال پیام
-def send_message(chat_id, text):
-    url = f"{API_URL}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    headers = {'Content-Type': 'application/json'}
-    requests.post(url, json=payload, headers=headers)
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# اجرای برنامه
-if __name__ == '__main__':
-    app.run(debug=True)
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, username_handler)],
+            REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, reason_handler)],
+            COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, count_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
+    app.add_handler(conv)
+    print("🏳️ Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
