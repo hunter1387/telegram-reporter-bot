@@ -2,7 +2,7 @@ import asyncio
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, ConversationHandler, filters
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telethon.tl.types import (
     InputReportReasonSpam,
     InputReportReasonFake,
@@ -24,7 +24,6 @@ reason_map = {
     "other": InputReportReasonOther()
 }
 
-# مراحل مکالمه
 USERNAME, REASON, COUNT = range(3)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,21 +38,30 @@ async def username_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = update.message.text.strip().lower()
     if reason not in reason_map:
-        await update.message.reply_text("❌ دلیل معتبر نیست.")
+        await update.message.reply_text("❌ دلیل معتبر نیست. لطفا یکی از این موارد را وارد کن: spam, fake, violence, porn, other")
         return REASON
     context.user_data['reason'] = reason
     await update.message.reply_text("چند پست آخر را ریپورت کنیم؟ (مثلاً 50):")
     return COUNT
 
 async def count_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    count = int(update.message.text.strip())
+    try:
+        count = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ لطفا یک عدد معتبر وارد کنید.")
+        return COUNT
+
     username = context.user_data['username']
     reason = context.user_data['reason']
 
     await update.message.reply_text("⏳ شروع ریپورت...")
 
     client = TelegramClient("session", API_ID, API_HASH)
-    await client.start(phone=PHONE)
+    try:
+        await client.start(phone=PHONE)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در اتصال به تلگرام: {e}")
+        return ConversationHandler.END
 
     try:
         entity = await client.get_entity(username)
@@ -61,13 +69,15 @@ async def count_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = 0
         for i, msg in enumerate(messages, 1):
             try:
-                await client.report_messages(entity, [msg.id], reason_map[reason], f"Reported via bot")
+                await client.report_messages(entity, [msg.id], reason_map[reason], "Reported via bot")
                 success += 1
+                await asyncio.sleep(1)  # جلوگیری از بلاک شدن به خاطر سرعت زیاد
             except Exception as e:
                 await update.message.reply_text(f"خطا در پست {i}: {e}")
         await update.message.reply_text(f"😽 تمام شد. تعداد موفق: {success}/{count}")
     finally:
         await client.disconnect()
+
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
